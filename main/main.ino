@@ -5,6 +5,8 @@
 #include <SHA256.h>
 #include "sha1.h"
 #include "TOTP.h"
+#include <ArduinoBLE.h>
+#include <RTC.h>
 
 //RFID and LCD
 #define RST_PIN 9
@@ -27,7 +29,7 @@ byte colPins[COLS] = {6, 7, 8};
 Keypad keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
 //Time
-long time = 1737753600;
+long timeq = 1737753600;
 
 //Menu items
 const int menuItemsCount = 5;
@@ -80,6 +82,8 @@ void setup() {
   Serial.begin(9600);
   SPI.begin();
   mfrc522.PCD_Init();
+
+  RTC.begin();
   
   lcd.init();
   lcd.backlight();
@@ -338,7 +342,7 @@ void main_menu(char key) {
         }
       }
     case 7:
-      if(true){ //true -> if connected
+      if(configureTotp()){ //true -> if connected
         lcd.clear();
         lcd.setCursor(0, 0);
         lcd.print("Confirm *-No #-Yes");
@@ -421,7 +425,7 @@ void check_card(char key) {
           } else step = 0;
         } 
         else if (key == '#' && pinLength == 6) {
-          char* newCode = totps[foundId]->getCode(time); //GET CODE FROM TOTPS
+          char* newCode = totps[foundId]->getCode(timeq); //GET CODE FROM TOTPS
           if(strcmp(code2FA, newCode) != 0) {
             code2FALength = 0;
             lcd.clear();
@@ -662,6 +666,137 @@ uint8_t* convertCharToKey(const char* str, int* keyLength) {
     }
 
     return key;
+}
+
+bool configureTotp() {
+  BLEService loginService("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+
+  BLECharacteristic pinCharacteristic("9c858901-8a57-4791-81fe-4c455b099bc9", BLEWrite, 20);
+  BLECharacteristic timestampCharacteristic("3f2504e0-4f89-11d3-9a0c-0305e82c3301", BLEWrite, 20);
+  BLECharacteristic keyCharacteristic("6ba7b810-9dad-11d1-80b4-00c04fd430c8", BLEWrite, 20);
+  BLECharacteristic statusCharacteristic("123e4567-e89b-12d3-a456-426614174000", BLENotify | BLEIndicate | BLERead, 20);
+
+  char* deviceName = "SafeVault";
+  char* totpPin;
+  generateRandomPin(totpPin);
+
+  BLE.setLocalName(deviceName);
+  BLE.setAdvertisedService(loginService);
+
+  loginService.addCharacteristic(keyCharacteristic);
+  loginService.addCharacteristic(pinCharacteristic);
+  loginService.addCharacteristic(timestampCharacteristic);
+  loginService.addCharacteristic(statusCharacteristic);
+  BLE.addService(loginService);
+
+  BLE.advertise();
+
+  Serial.println("BLE Peripheral with PIN started");
+  Serial.print("Device name: "); Serial.println(deviceName);
+  Serial.print("Safety PIN: "); Serial.println(pin);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Name: ");
+  lcd.print(deviceName);
+  lcd.setCursor(1,0);
+  lcd.print("PIN: ");
+  lcd.print(totpPin);
+
+  unsigned long startTime = millis();
+  while (millis() - startTime < 180000) {
+    BLEDevice central = BLE.central();
+
+    if (central) {
+      Serial.print("Connected to central: ");
+      Serial.println(central.address());
+
+      while (central.connected()) {
+
+        if (timestampCharacteristic.written()) {
+          int len = timestampCharacteristic.valueLength();
+          char buf[21];
+          memcpy(buf, timestampCharacteristic.value(), len);
+          buf[len] = '\0';
+          String timestampString = String(buf);
+
+          uint32_t epochSeconds = timestampString.toInt();
+
+          RTCTime currentTime = epochSecToRTCTime(epochSeconds);
+
+          RTC.setTime(currentTime);
+
+          Serial.print("Time set to: "); Serial.println(currentTime);
+        }
+
+        if (keyCharacteristic.written()) {
+          int length = pinCharacteristic.valueLength();
+          const uint8_t* data = pinCharacteristic.value();
+
+          char receivedPin[length + 1];
+          memcpy(receivedPin, data, length);
+          receivedPin[length] = '\0';
+
+          Serial.print("Received PIN: ");
+          Serial.println(receivedPin);
+
+          if (strcmp(receivedPin, totpPin) == 0) {
+            int length = keyCharacteristic.valueLength();
+            const uint8_t* data = keyCharacteristic.value();
+
+            char receivedKey[length + 1];
+            memcpy(receivedKey, data, length);
+            receivedKey[length] = '\0';
+
+            Serial.print("Received key: ");
+            Serial.println(receivedKey);
+
+            cardsSecrets[cardSelecting] = receivedKey;
+
+            statusCharacteristic.writeValue("success");
+            central.disconnect();
+            BLE.end();
+
+            return true;
+          }
+          else {
+            Serial.println("Wrong PIN");
+            statusCharacteristic.writeValue("failure");
+            central.disconnect();
+          }
+        }
+      }
+
+      Serial.print("Disconnected from central: ");
+      Serial.println(central.address());
+    }
+  }
+  return false;
+}
+
+RTCTime epochSecToRTCTime(uint32_t epochSeconds) {
+  time_t rawTime = epochSeconds;
+  struct tm * timeinfo = gmtime(&rawTime);
+
+  RTCTime rtcTime(
+    timeinfo->tm_mday,
+    Month(timeinfo->tm_mon),
+    timeinfo->tm_year + 1900,
+    timeinfo->tm_hour,
+    timeinfo->tm_min,
+    timeinfo->tm_sec,
+    DayOfWeek((timeinfo->tm_wday == 0) ? 7 : timeinfo->tm_wday),
+    SaveLight::SAVING_TIME_INACTIVE
+  );
+
+  return rtcTime;
+}
+
+void generateRandomPin(char* buffer) {
+  for (int i = 0; i < 4; i++) {
+    buffer[i] = '0' + random(0, 10);
+  }
+  buffer[4] = '\0'; 
 }
 
 
