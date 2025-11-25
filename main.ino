@@ -1,10 +1,11 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <LiquidCrystal_I2C.h>
-#include <Keypad.h>
+#include <DIYables_Keypad.h>
 #include <SHA256.h>
 #include "sha1.h"
 #include "TOTP.h"
+#include <Servo.h>
 
 //RFID and LCD
 #define RST_PIN 9
@@ -24,10 +25,10 @@ char keys[ROWS][COLS] = {
 };
 byte rowPins[ROWS] = {2, 3, 4, 5};
 byte colPins[COLS] = {6, 7, 8};
-Keypad keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
+DIYables_Keypad keypad((char*)keys, rowPins, colPins, ROWS, COLS);
 
 //Time
-long time = 1737753600;
+long timeq = 1737753600;
 
 //Menu items
 const int menuItemsCount = 5;
@@ -44,6 +45,9 @@ int cards = 0;
 bool logged = false;
 bool config = true;
 int step = 0;
+
+//Servo
+bool servoOpened;
 
 //Menu navigation
 int displayStartMenu = 0;
@@ -75,6 +79,8 @@ int code2FALength = 0;
 //Animation
 int dotAnim = 0;
 
+Servo myservo;
+
 //SETUP
 void setup() {
   Serial.begin(9600);
@@ -83,6 +89,15 @@ void setup() {
   
   lcd.init();
   lcd.backlight();
+  myservo.attach(15);
+
+  
+  delay(3000);
+  myservo.write(90);
+  delay(1000);
+  myservo.write(60);
+  delay(1000);
+  myservo.write(90);
 }
 
 //MAIN LOOP
@@ -98,11 +113,11 @@ void loop() {
     main_menu(key);
   } 
   // If PIN mode active
-  else if (key || checkingPin) {
+  else if ((key || checkingPin) && !logged) {
     check_pin(key);
   } 
   // Default card scanning mode
-  else if (!logged) {
+  else {
     check_card(key);
   }
 }
@@ -408,6 +423,28 @@ void remove_card(int index) {
 
 //CARD READING
 void check_card(char key) {
+  if(step == 2){
+    if (key) {   // jeśli jakiś klawisz został naciśnięty
+      if (key == '1') {
+          myservo.write(120);
+          delay(1000);
+          myservo.write(90);
+        }
+      else if (key == '2') {
+        myservo.write(60);
+          delay(1000);
+          myservo.write(90);
+      }
+      else if (key == '#') {
+        lcd.clear();
+        lcd.setCursor(0, 1);
+        lcd.print("Scan card");
+        step = 0;            // reset zmiennej
+        logged = false;
+      }
+    }
+    return;
+  }
   if(step == 1){ //2FA CODE
     if(key){
       if (key >= '0' && key <= '9' && code2FALength < 6) {
@@ -421,7 +458,7 @@ void check_card(char key) {
           } else step = 0;
         } 
         else if (key == '#' && pinLength == 6) {
-          char* newCode = totps[foundId]->getCode(time); //GET CODE FROM TOTPS
+          char* newCode = totps[foundId]->getCode(timeq); //GET CODE FROM TOTPS
           if(strcmp(code2FA, newCode) != 0) {
             code2FALength = 0;
             lcd.clear();
@@ -493,6 +530,12 @@ void check_card(char key) {
         return;
     }else{
       lcd.print("Card authorized");
+      step = 2;
+      logged = true;
+      delay(2000);
+      lcd.clear();
+      lcd.print("1-OPEN 2-CLOSE");
+      return;
       Serial.println("Card authorized");
     }
     
@@ -663,5 +706,3 @@ uint8_t* convertCharToKey(const char* str, int* keyLength) {
 
     return key;
 }
-
-
