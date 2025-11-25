@@ -6,6 +6,8 @@
 #include "sha1.h"
 #include "TOTP.h"
 #include <Servo.h>
+#include <ArduinoBLE.h>
+#include <RTC.h>
 
 //RFID and LCD
 #define RST_PIN 9
@@ -26,9 +28,6 @@ char keys[ROWS][COLS] = {
 byte rowPins[ROWS] = {2, 3, 4, 5};
 byte colPins[COLS] = {6, 7, 8};
 DIYables_Keypad keypad((char*)keys, rowPins, colPins, ROWS, COLS);
-
-//Time
-long timeq = 1737753600;
 
 //Menu items
 const int menuItemsCount = 5;
@@ -70,11 +69,13 @@ byte storedCards[9][4];
 int cardCount = 0;
 
 //2FA
-char* cardsSecrets[9] = {0};
+String cardsSecrets[9];
+int cardsSecretsLen[9];
 TOTP* totps[9];
 int foundId = 0;
 char code2FA[7];
 int code2FALength = 0;
+bool start2FA = false;
 
 //Animation
 int dotAnim = 0;
@@ -91,8 +92,8 @@ void setup() {
   lcd.backlight();
   myservo.attach(15);
 
-  
-  delay(3000);
+  RTC.begin();
+
   myservo.write(90);
   delay(1000);
   myservo.write(60);
@@ -113,7 +114,7 @@ void loop() {
     main_menu(key);
   } 
   // If PIN mode active
-  else if ((key || checkingPin) && !logged) {
+  else if ((key || checkingPin) && !logged && !start2FA) {
     check_pin(key);
   } 
   // Default card scanning mode
@@ -198,7 +199,9 @@ void main_menu(char key) {
       else if (key == '3' && displayStartMenu==2) { // 2FA CONFIG
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print("Select card for 2FA");
+        lcd.print("Select card");
+        lcd.setCursor(0, 1);
+        lcd.print("for 2FA");
         delay(1500);
         show_page_cards(displayStartMenuCards);
         step = 6;
@@ -222,6 +225,7 @@ void main_menu(char key) {
           lcd.print("Locked");
           delay(3000);
           lcd.clear();
+          step = 0;
           config = false;
         }
       } 
@@ -344,6 +348,7 @@ void main_menu(char key) {
           lcd.print("Selected card:");
           lcd.setCursor(0, 1);
           lcd.print(uidStr);
+          Serial.println("PAIR");
           delay(2000);
           lcd.clear();
           lcd.setCursor(0, 0);
@@ -352,32 +357,16 @@ void main_menu(char key) {
           cardSelecting = index - 1;
         }
       }
+      break;
     case 7:
-      if(true){ //true -> if connected
-        lcd.clear();
-        lcd.setCursor(0, 0);
-        lcd.print("Confirm *-No #-Yes");
-        step = 8;
-      }
-      if (key == '*') {
-        show_page_cards(displayStartMenuCards);
-        step = 6;
-      }
-    case 8:
-      if (key == '#') {
-        int keyLen = 0;
-        cardsSecrets[cardSelecting] = "SECRET"; //SECRET GET SECRET
-        uint8_t* hmacKey = convertCharToKey(cardsSecrets[cardSelecting], &keyLen);
-        totps[cardSelecting] = new TOTP(hmacKey, keyLen);
-        //timeDif = time.time() - bf.time;
-        //getTime -> time.time() + timeDif;
+      if(configureTotp()){ //true -> if connected
         lcd.clear();
         lcd.setCursor(0, 0);
         lcd.print("All set!");
         delay(2000);
         step = 0;
-      } 
-      else if (key == '*') {
+      }
+      if (key == '*') {
         show_page_cards(displayStartMenuCards);
         step = 6;
       } 
@@ -455,29 +444,57 @@ void check_card(char key) {
           if (code2FALength > 0) {
             code2FALength--;
             code2FA[code2FALength] = '\0';
-          } else step = 0;
-        } 
-        else if (key == '#' && pinLength == 6) {
-          char* newCode = totps[foundId]->getCode(timeq); //GET CODE FROM TOTPS
-          if(strcmp(code2FA, newCode) != 0) {
-            code2FALength = 0;
-            lcd.clear();
-            lcd.setCursor(0, 0);
-            lcd.print("OK");
-            delay(3000);
+          } else {
             step = 0;
+            start2FA = false;
+          }
+        } 
+        else if (key == '#' && code2FALength == 6) {
+          RTCTime t;
+          RTC.getTime(t);
+          uint32_t timestamp = RTCTimeToEpoch(t);
+
+          int keyLen = 0;
+
+          uint8_t* key = convertStringToKey(cardsSecrets[foundId], &keyLen);
+
+          TOTP totp = TOTP(key, keyLen);
+          char* newCode = totp.getCode(timestamp);
+
+          Serial.println(timestamp);
+          Serial.println();
+          Serial.println(code2FA);
+          Serial.println();
+          Serial.println(newCode);
+          Serial.println(cardsSecrets[foundId]);
+          Serial.println(cardsSecretsLen[foundId]);
+          if(strcmp(code2FA, newCode) == 0) {
+            code2FALength = 0;
+            step = 2;
+            logged = true;
+            start2FA = false;
+            delay(2000);
+            lcd.clear();
+            lcd.print("1-OPEN 2-CLOSE");
+            return;
+            Serial.println("Card authorized");
           }else{
             lcd.clear();
             lcd.setCursor(0, 0);
             lcd.print("Wrong code!");
+            code2FALength = 0;
+            memset(code2FA, 0, sizeof(enteredPin));
             delay(3000);
+            lcd.clear();
+            lcd.setCursor(0, 0);
+            lcd.print("Enter code");
           }
         }
-
         // Display PIN as stars
         lcd.setCursor(0, 1);
         lcd.print(String(code2FA) + "      ");
     }
+    return;
   }
   static unsigned long lastAnimTime = 0;
   lcd.setCursor(0, 0);
@@ -519,7 +536,7 @@ void check_card(char key) {
   lcd.clear();
   lcd.setCursor(0, 0);
   if (found) {
-    if(cardsSecrets[foundId] != 0){
+    if(cardsSecretsLen[foundId] != 0){
         lcd.print("Enter 2FA code:");
         step = 1;
         delay(2000);
@@ -527,6 +544,7 @@ void check_card(char key) {
         lcd.setCursor(0, 0);
         lcd.print("Enter code");
         pinLength = 0;
+        start2FA = true;
         return;
     }else{
       lcd.print("Card authorized");
@@ -689,20 +707,169 @@ void show_page_cards(int startIndex) {
   }
 }
 
-uint8_t* convertCharToKey(const char* str, int* keyLength) {
-    int len = 0;
-
-    while (str[len] != '\0') {
-        len++;
-    }
-
+uint8_t* convertStringToKey(const String& str, int* keyLength) {
+    int len = str.length();
     *keyLength = len;
 
     uint8_t* key = (uint8_t*)malloc(len);
+    if (!key) return nullptr;
 
     for (int i = 0; i < len; i++) {
         key[i] = (uint8_t)str[i];
     }
 
     return key;
+}
+
+
+bool configureTotp() {
+  BLEService loginService("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+
+  BLECharacteristic pinCharacteristic("9c858901-8a57-4791-81fe-4c455b099bc9", BLEWrite, 20);
+  BLECharacteristic timestampCharacteristic("3f2504e0-4f89-11d3-9a0c-0305e82c3301", BLEWrite, 20);
+  BLECharacteristic keyCharacteristic("6ba7b810-9dad-11d1-80b4-00c04fd430c8", BLEWrite, 20);
+  BLECharacteristic statusCharacteristic("123e4567-e89b-12d3-a456-426614174000", BLENotify | BLEIndicate | BLERead, 20);
+
+  char* deviceName = "SafeVault";
+  char totpPin[5];
+  generateRandomPin(totpPin);
+  if (!BLE.begin()) {
+    Serial.println("Starting BLE failed");
+    return false;
+  }
+
+  BLE.setLocalName(deviceName);
+  BLE.setAdvertisedService(loginService);
+
+  loginService.addCharacteristic(keyCharacteristic);
+  loginService.addCharacteristic(pinCharacteristic);
+  loginService.addCharacteristic(timestampCharacteristic);
+  loginService.addCharacteristic(statusCharacteristic);
+  BLE.addService(loginService);
+
+  BLE.advertise();
+
+  Serial.println("BLE Peripheral with PIN started");
+  Serial.print("Device name: "); Serial.println(deviceName);
+  Serial.print("Safety PIN: "); Serial.println(totpPin);
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Name: ");
+  lcd.print(deviceName);
+  lcd.setCursor(0,1);
+  lcd.print("PIN: ");
+  lcd.print(totpPin);
+
+  unsigned long startTime = millis();
+  while (millis() - startTime < 180000) {
+    BLEDevice central = BLE.central();
+
+    if (central) {
+      Serial.print("Connected to central: ");
+      Serial.println(central.address());
+
+      while (central.connected()) {
+
+        if (timestampCharacteristic.written()) {
+          int len = timestampCharacteristic.valueLength();
+          char buf[21];
+          memcpy(buf, timestampCharacteristic.value(), len);
+          buf[len] = '\0';
+          String timestampString = String(buf);
+
+          uint32_t epochSeconds = timestampString.toInt();
+
+          RTCTime currentTime = epochSecToRTCTime(epochSeconds);
+
+          RTC.setTime(currentTime);
+
+          Serial.print("Time set to: "); Serial.println(currentTime);
+        }
+
+        if (keyCharacteristic.written()) {
+          int length = pinCharacteristic.valueLength();
+          const uint8_t* data = pinCharacteristic.value();
+
+          char receivedPin[length + 1];
+          memcpy(receivedPin, data, length);
+          receivedPin[length] = '\0';
+
+          Serial.print("Received PIN: ");
+          Serial.println(receivedPin);
+
+          if (strcmp(receivedPin, totpPin) == 0) {
+            int length = keyCharacteristic.valueLength();
+            const uint8_t* data = keyCharacteristic.value();
+
+            char receivedKey[length + 1];
+            memcpy(receivedKey, data, length);
+            receivedKey[length] = '\0';
+
+            Serial.print("Received key: ");
+            Serial.println(receivedKey);
+
+            cardsSecrets[cardSelecting] = String(receivedKey);
+            cardsSecretsLen[cardSelecting] = length + 1;
+
+            statusCharacteristic.writeValue("success");
+            central.disconnect();
+            BLE.end();
+
+            return true;
+          }
+          else {
+            Serial.println("Wrong PIN");
+            statusCharacteristic.writeValue("failure");
+            central.disconnect();
+          }
+        }
+      }
+
+      Serial.print("Disconnected from central: ");
+      Serial.println(central.address());
+    }
+  }
+  BLE.end();
+  return false;
+}
+
+RTCTime epochSecToRTCTime(uint32_t epochSeconds) {
+  time_t rawTime = epochSeconds;
+  struct tm * timeinfo = gmtime(&rawTime);
+
+  RTCTime rtcTime(
+    timeinfo->tm_mday,
+    Month(timeinfo->tm_mon),
+    timeinfo->tm_year + 1900,
+    timeinfo->tm_hour,
+    timeinfo->tm_min,
+    timeinfo->tm_sec,
+    DayOfWeek((timeinfo->tm_wday == 0) ? 7 : timeinfo->tm_wday),
+    SaveLight::SAVING_TIME_INACTIVE
+  );
+
+  return rtcTime;
+}
+
+uint32_t RTCTimeToEpoch(const RTCTime& t) {
+  struct tm timeinfo;
+
+  timeinfo.tm_year = t.getYear() - 1900;             // rok od 1900
+  timeinfo.tm_mon  = (int)t.getMonth();             // miesiąc 0-11 w tm, więc w razie potrzeby odejmij 1
+  timeinfo.tm_mday = t.getDayOfMonth();             // dzień miesiąca
+  timeinfo.tm_hour = t.getHour();
+  timeinfo.tm_min  = t.getMinutes();
+  timeinfo.tm_sec  = t.getSeconds();
+  timeinfo.tm_isdst = 0;                            // brak DST
+
+  return (uint32_t)mktime(&timeinfo);
+}
+
+
+void generateRandomPin(char* buffer) {
+  for (int i = 0; i < 4; i++) {
+    buffer[i] = '0' + random(0, 10);
+  }
+  buffer[4] = '\0'; 
 }
